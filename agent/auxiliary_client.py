@@ -7284,12 +7284,42 @@ def _build_call_kwargs(
             from hermes_cli.providers import nous_api_mode
 
             _nous_on_messages = nous_api_mode(model) == "anthropic_messages"
+        # Claude models reached over an OpenAI-compatible (/chat/completions)
+        # wire through a Vertex/Bedrock-style proxy — e.g. Argonne's Argo
+        # gateway. Such a proxy backs Claude, which treats max_tokens as a
+        # MANDATORY field on the native wire; when it receives a request with
+        # no cap it assumes the model's full output budget, estimates the
+        # request could exceed 10 minutes, and REFUSES the non-streaming call
+        # ("Streaming is required for operations that may take longer than 10
+        # minutes"). That breaks every auxiliary task (vision, compression,
+        # titles, …) on the proxy. We therefore keep the caller's cap for
+        # Claude models, but ONLY on unrecognised custom endpoints — the
+        # well-behaved aggregators that serve Claude uncapped without issue
+        # (OpenRouter, Nous Portal) and native Anthropic keep the existing
+        # omit-to-avoid-truncation behaviour. Claude always accepts max_tokens,
+        # so keeping it on the proxy path is safe.
+        from agent.anthropic_adapter import _is_claude_model
+        _SAFE_UNCAPPED_CLAUDE_HOSTS = (
+            "openrouter.ai",
+            "inference-api.nousresearch.com",
+            "api.anthropic.com",
+        )
+        _claude_host_is_safe_uncapped = any(
+            base_url_host_matches(_effective_base, _h)
+            for _h in _SAFE_UNCAPPED_CLAUDE_HOSTS
+        )
+        _is_claude_on_proxy_wire = (
+            _is_claude_model(model)
+            and _provider_norm not in {"openrouter", "nous", "anthropic"}
+            and not _claude_host_is_safe_uncapped
+        )
         if (
             _is_anthropic_compat_endpoint(provider, _effective_base)
             or _nous_on_messages
             or _is_nvidia_nim
             or _is_moa
             or _is_gemini_native
+            or _is_claude_on_proxy_wire
         ):
             # Use auxiliary_max_tokens_param() so models that require
             # max_completion_tokens (GPT-5 family, Copilot) get the right

@@ -657,6 +657,65 @@ class TestBuildCallKwargsMaxTokens:
         )
         assert kwargs["max_tokens"] == 4096
 
+    # ── Claude over an OpenAI-compatible Vertex/Bedrock proxy (e.g. Argonne's
+    #    Argo gateway) must keep max_tokens, or the proxy refuses the
+    #    non-streaming request with "Streaming is required for operations that
+    #    may take longer than 10 minutes". ──
+
+    @pytest.mark.parametrize(
+        "provider,model,base_url",
+        [
+            ("custom", "Claude Opus 4.8", "https://apps-stage.inside.anl.gov/argoapi/v1"),
+            ("custom", "Claude Opus 4.8", "https://apps.inside.anl.gov/argoapi/v1"),
+            ("custom", "claude-sonnet-4.6", "https://proxy.example.com/v1"),
+            ("custom:argo", "claude-opus-4.8", "https://gateway.internal/v1"),
+        ],
+    )
+    def test_keeps_max_tokens_for_claude_on_proxy_wire(self, provider, model, base_url):
+        """Claude served over an OpenAI /chat/completions proxy keeps the cap.
+
+        A Vertex/Bedrock-style proxy (Argo) backs Claude, which requires
+        max_tokens on the native wire. With no cap the proxy assumes the full
+        output budget, estimates >10 min, and refuses the non-streaming call.
+        The endpoint is NOT in the anthropic-compat host allowlist, so the fix
+        keys off the Claude model name for unrecognised custom endpoints.
+        """
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider=provider,
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=2000,
+            base_url=base_url,
+        )
+        assert kwargs["max_tokens"] == 2000
+        assert "max_completion_tokens" not in kwargs
+
+    @pytest.mark.parametrize(
+        "provider,model,base_url",
+        [
+            # Aggregators/native that serve Claude uncapped without issue keep
+            # the omit-to-avoid-truncation behaviour — the proxy fix must not
+            # regress them.
+            ("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1"),
+            ("nous", "claude-sonnet", "https://inference-api.nousresearch.com/v1"),
+            ("anthropic", "claude-opus-4.8", "https://api.anthropic.com"),
+        ],
+    )
+    def test_omits_max_tokens_for_claude_on_safe_aggregators(self, provider, model, base_url):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider=provider,
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=2000,
+            base_url=base_url,
+        )
+        assert "max_tokens" not in kwargs
+        assert "max_completion_tokens" not in kwargs
+
     # ── MoA task should honor max_tokens on ALL providers (#reference_max_tokens) ──
 
     @pytest.mark.parametrize(
