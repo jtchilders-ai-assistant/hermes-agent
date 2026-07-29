@@ -282,6 +282,95 @@ class TestChatCompletionsBasic:
         assert msgs[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "SIG_123"
 
 
+class TestToolMessageNameStrip:
+    """Config-gated strip of ``name`` on tool-result messages.
+
+    Some strict OpenAI-compatible gateways (ALCF Inference Service vLLM) reject
+    a ``role: tool`` message carrying a ``name`` field with HTTP 422
+    ``extra_forbidden``, breaking the second turn of any agentic session. The
+    strip is opt-in via ``model.strip_tool_message_name`` because ``name`` is a
+    valid field for compliant providers.
+    """
+
+    @pytest.fixture
+    def transport(self):
+        import agent.transports.chat_completions  # noqa: F401
+        return get_transport("chat_completions")
+
+    def _tool_msgs(self):
+        return [
+            {"role": "user", "content": "run echo hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call_1",
+                "content": "hi",
+            },
+        ]
+
+    def test_name_preserved_when_flag_disabled(self, transport, monkeypatch):
+        """Default (flag off): ``name`` stays on the tool message so compliant
+        providers that accept/ignore it are unaffected."""
+        monkeypatch.setattr(
+            "agent.transports.chat_completions._strip_tool_message_name_enabled",
+            lambda: False,
+        )
+        msgs = self._tool_msgs()
+        result = transport.convert_messages(msgs)
+        # No sanitize needed -> returned by identity, name intact.
+        assert result[2].get("name") == "terminal"
+
+    def test_name_stripped_when_flag_enabled(self, transport, monkeypatch):
+        """Flag on: ``name`` removed from the tool message; tool_call_id and
+        content preserved so the call/result pairing survives."""
+        monkeypatch.setattr(
+            "agent.transports.chat_completions._strip_tool_message_name_enabled",
+            lambda: True,
+        )
+        msgs = self._tool_msgs()
+        result = transport.convert_messages(msgs)
+        tool_msg = result[2]
+        assert "name" not in tool_msg
+        assert tool_msg["tool_call_id"] == "call_1"
+        assert tool_msg["content"] == "hi"
+        assert tool_msg["role"] == "tool"
+        # Original list untouched (copy-on-demand contract).
+        assert msgs[2]["name"] == "terminal"
+
+    def test_assistant_tool_call_name_not_stripped(self, transport, monkeypatch):
+        """The ``name`` inside ``assistant.tool_calls[*].function`` is required
+        and must NOT be stripped — only the top-level ``name`` on ``role: tool``
+        messages is the problem field."""
+        monkeypatch.setattr(
+            "agent.transports.chat_completions._strip_tool_message_name_enabled",
+            lambda: True,
+        )
+        msgs = self._tool_msgs()
+        result = transport.convert_messages(msgs)
+        assert result[1]["tool_calls"][0]["function"]["name"] == "terminal"
+
+    def test_config_reader_defaults_false_on_error(self, monkeypatch):
+        """The config reader returns False (safe default) when config cannot be
+        resolved, and caches the result."""
+        import agent.transports.chat_completions as cc
+        monkeypatch.setattr(cc, "_STRIP_TOOL_MESSAGE_NAME", None)
+
+        def _boom(*a, **k):
+            raise RuntimeError("no config")
+
+        monkeypatch.setattr("hermes_cli.config.load_config", _boom)
+        assert cc._strip_tool_message_name_enabled() is False
+
+
 class TestChatCompletionsBuildKwargs:
 
     def test_basic_kwargs(self, transport):
