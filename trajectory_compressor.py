@@ -21,6 +21,7 @@ import yaml
 import logging
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -343,6 +344,52 @@ class TrajectoryCompressor:
             return "codex"
         return next((provider for host, provider in _PROVIDER_HOSTS if base_url_host_matches(url, host)), "")
 
+    def _should_stream_summary(self) -> bool:
+        """Whether this raw-client Claude proxy call should stream."""
+        try:
+            from agent.anthropic_adapter import is_claude_on_proxy_wire, stream_claude_on_proxy_enabled
+            return (
+                stream_claude_on_proxy_enabled()
+                and is_claude_on_proxy_wire(
+                    self.config.summarization_model, self._detect_provider(), self.config.base_url
+                )
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _aggregate_summary_stream(chunks) -> Any:
+        parts: List[str] = []
+        for chunk in chunks:
+            try:
+                choices = getattr(chunk, "choices", None) or []
+                delta = getattr(choices[0], "delta", None) if choices else None
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    parts.append(piece)
+            except Exception:
+                continue
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="".join(parts)))])
+
+    def _create_streaming(self, client, create_kwargs: Dict[str, Any]) -> Any:
+        return self._aggregate_summary_stream(
+            client.chat.completions.create(**{**create_kwargs, "stream": True})
+        )
+
+    async def _acreate_streaming(self, client, create_kwargs: Dict[str, Any]) -> Any:
+        chunks = await client.chat.completions.create(**{**create_kwargs, "stream": True})
+        parts: List[str] = []
+        async for chunk in chunks:
+            try:
+                choices = getattr(chunk, "choices", None) or []
+                delta = getattr(choices[0], "delta", None) if choices else None
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    parts.append(piece)
+            except Exception:
+                continue
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="".join(parts)))])
+
     def count_tokens(self, text: str) -> int:
         """Token count via the configured tokenizer; falls back to len//4."""
         if not text:
@@ -464,7 +511,11 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     from agent.auxiliary_client import call_llm
                     response = call_llm(provider=self._llm_provider, temperature=temperature, **kwargs)
                 else:
-                    response = self.client.chat.completions.create(**kwargs)
+                    response = (
+                        self._create_streaming(self.client, kwargs)
+                        if self._should_stream_summary()
+                        else self.client.chat.completions.create(**kwargs)
+                    )
                 return self._finish_summary(response)
             except Exception as e:
                 delay = self._summary_attempt_failed(metrics, attempt, e)
@@ -483,7 +534,12 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     from agent.auxiliary_client import async_call_llm
                     response = await async_call_llm(provider=self._llm_provider, temperature=temperature, **kwargs)
                 else:
-                    response = await self._get_async_client().chat.completions.create(**kwargs)
+                    client = self._get_async_client()
+                    response = (
+                        await self._acreate_streaming(client, kwargs)
+                        if self._should_stream_summary()
+                        else await client.chat.completions.create(**kwargs)
+                    )
                 return self._finish_summary(response)
             except Exception as e:
                 delay = self._summary_attempt_failed(metrics, attempt, e)

@@ -6801,11 +6801,18 @@ def _is_managed_local_endpoint(base_url: Optional[str]) -> bool:
         return False
 
 
-def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
+def _provider_requires_stream(provider: str, base_url: Optional[str], model: Optional[str] = None) -> bool:
     """Providers that only accept streaming (non-stream = 400): Tencent Copilot, any
     ``auxiliary.stream_only_base_urls`` substring, and the managed local llama-server
     (streamed for cancellation — it only notices a dead client on socket write)."""
     _url = str(base_url or "").lower()
+    if model is not None:
+        try:
+            from agent.anthropic_adapter import is_claude_on_proxy_wire, stream_claude_on_proxy_enabled
+            if stream_claude_on_proxy_enabled() and is_claude_on_proxy_wire(model, provider, base_url):
+                return True
+        except Exception:
+            pass
     if not _url:
         return False
     if base_url_host_matches(_url, "copilot.tencent.com") or _is_managed_local_endpoint(_url):
@@ -7963,7 +7970,7 @@ def _call_llm_impl(
                 create=lambda request: _create_with_progress(
                     client, request, task,
                     force_stream=_provider_requires_stream(
-                        request_provider, req.base_info or req.resolved_base_url),
+                        request_provider, req.base_info or req.resolved_base_url, kwargs.get("model")),
                 ),
             ),
             task, **validate_kw,
@@ -8119,7 +8126,14 @@ async def _async_call_llm_impl(
     try:
         # Retry ONCE on the same provider for a transient blip before fallback (see call_llm()).
         # (PR #16587)
-        _force_stream_async = _provider_requires_stream(request_provider, req.base_info or req.resolved_base_url)
+        _force_stream_async = (
+            _provider_requires_stream(
+                request_provider, req.base_info or req.resolved_base_url, kwargs.get("model")
+            )
+            and not isinstance(client, (
+                AsyncCodexAuxiliaryClient, AsyncAnthropicAuxiliaryClient, AsyncBedrockAuxiliaryClient,
+            ))
+        )
 
         async def _acreate(_kwargs: Dict[str, Any]) -> Any:
             return await _acreate_with_progress(client, _kwargs, task, force_stream=_force_stream_async)

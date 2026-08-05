@@ -1952,3 +1952,59 @@ def test_unsupported_inline_image_subtype_downgrades_to_text_for_anthropic(monke
     assert blocks[0]["source"] == {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}
     assert blocks[1]["text"] == "[image omitted: image/svg+xml is not a supported image format]"
     assert blocks[2]["source"]["media_type"] == "image/jpeg"
+
+
+_ARGO_URL = "https://apps-stage.inside.anl.gov/argoapi/v1"
+
+
+class TestIsClaudeOnProxyWire:
+    """is_claude_on_proxy_wire + stream_claude_on_proxy_enabled — the shared
+    predicate for streaming Claude over an OpenAI-wire proxy (e.g. Argo)."""
+
+    def test_claude_on_argo_is_proxy_wire(self):
+        from agent.anthropic_adapter import is_claude_on_proxy_wire
+        assert is_claude_on_proxy_wire("Claude Opus 4.8", "custom", _ARGO_URL) is True
+        assert is_claude_on_proxy_wire("claude-opus-4.8", "custom", _ARGO_URL) is True
+
+    def test_non_claude_is_not(self):
+        from agent.anthropic_adapter import is_claude_on_proxy_wire
+        assert is_claude_on_proxy_wire("GPT-5.6 Sol", "custom", _ARGO_URL) is False
+        assert is_claude_on_proxy_wire("gpt56sol", "custom", _ARGO_URL) is False
+        assert is_claude_on_proxy_wire(None, "custom", _ARGO_URL) is False
+
+    def test_native_providers_excluded(self):
+        from agent.anthropic_adapter import is_claude_on_proxy_wire
+        assert is_claude_on_proxy_wire(
+            "Claude Opus 4.8", "anthropic", "https://api.anthropic.com") is False
+        assert is_claude_on_proxy_wire(
+            "Claude Opus 4.8", "openrouter", "https://openrouter.ai/api/v1") is False
+        assert is_claude_on_proxy_wire(
+            "Claude Opus 4.8", "nous",
+            "https://inference-api.nousresearch.com/v1") is False
+
+    def test_safe_uncapped_host_excluded_even_with_custom_provider(self):
+        from agent.anthropic_adapter import is_claude_on_proxy_wire
+        # A custom provider pointed at native Anthropic is still not a proxy.
+        assert is_claude_on_proxy_wire(
+            "claude-3", "custom", "https://api.anthropic.com") is False
+
+    def test_flag_default_off(self):
+        from agent.anthropic_adapter import stream_claude_on_proxy_enabled
+        with patch("hermes_cli.config.load_config", return_value={"auxiliary": {}}):
+            assert stream_claude_on_proxy_enabled() is False
+
+    def test_flag_on_when_set(self):
+        from agent.anthropic_adapter import stream_claude_on_proxy_enabled
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert stream_claude_on_proxy_enabled() is True
+
+    def test_flag_read_failure_fails_off(self):
+        from agent.anthropic_adapter import stream_claude_on_proxy_enabled
+        with patch(
+            "hermes_cli.config.load_config",
+            side_effect=RuntimeError("broken"),
+        ):
+            assert stream_claude_on_proxy_enabled() is False

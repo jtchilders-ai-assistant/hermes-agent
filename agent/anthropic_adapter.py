@@ -98,6 +98,39 @@ def _is_claude_model(model: str | None) -> bool:
     return "claude" in (model or "").lower()
 
 
+_SAFE_UNCAPPED_CLAUDE_HOSTS = (
+    "openrouter.ai",
+    "inference-api.nousresearch.com",
+    "api.anthropic.com",
+)
+_NATIVE_CLAUDE_PROVIDERS = {"openrouter", "nous", "anthropic"}
+
+
+def is_claude_on_proxy_wire(
+    model: str | None, provider: str | None, base_url: str | None,
+) -> bool:
+    """Whether Claude is served through an unrecognized OpenAI-compatible proxy."""
+    if not _is_claude_model(model):
+        return False
+    provider_norm = (provider or "").strip().lower()
+    if provider_norm in _NATIVE_CLAUDE_PROVIDERS:
+        return False
+    url = str(base_url or "")
+    if any(base_url_host_matches(url, host) for host in _SAFE_UNCAPPED_CLAUDE_HOSTS):
+        return False
+    return True
+
+
+def stream_claude_on_proxy_enabled() -> bool:
+    """Opt-in streaming for Claude calls through OpenAI-compatible proxies."""
+    try:
+        from hermes_cli.config import load_config
+        aux_cfg = (load_config() or {}).get("auxiliary", {}) or {}
+        return bool(aux_cfg.get("stream_claude_on_proxy", False))
+    except Exception:
+        return False
+
+
 def _model_matches(model: str, substrings) -> bool:
     """Case-insensitive substring match of ``model`` against a family list."""
     m = model.lower()
