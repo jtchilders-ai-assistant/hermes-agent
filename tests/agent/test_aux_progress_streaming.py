@@ -315,6 +315,74 @@ class TestProviderRequiresStream:
             ) is False
 
 
+_ARGO = "https://apps-stage.inside.anl.gov/argoapi/v1"
+
+
+class TestClaudeOnProxyStreaming:
+    """auxiliary.stream_claude_on_proxy: stream Claude on an OpenAI-wire proxy
+    (e.g. Argo) to dodge the 'Streaming is required' refusal. Default-off."""
+
+    def test_flag_off_claude_on_argo_not_forced(self):
+        # Default behavior: no flag -> unchanged (relies on max_tokens cap fix).
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {}},
+        ):
+            assert _provider_requires_stream(
+                "custom", _ARGO, "Claude Opus 4.8"
+            ) is False
+
+    def test_flag_on_claude_on_argo_forces_stream(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert _provider_requires_stream(
+                "custom", _ARGO, "Claude Opus 4.8"
+            ) is True
+            assert _provider_requires_stream(
+                "custom", _ARGO, "claude-opus-4.8"
+            ) is True
+
+    def test_flag_on_but_gpt_not_forced(self):
+        # Non-Claude models on the same proxy must NOT be forced to stream
+        # (GPT-5.6 Sol works fine non-streaming; that path is unaffected).
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert _provider_requires_stream(
+                "custom", _ARGO, "GPT-5.6 Sol"
+            ) is False
+            assert _provider_requires_stream(
+                "custom", _ARGO, "gpt56sol"
+            ) is False
+
+    def test_flag_on_but_native_or_safe_host_not_forced(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            # Native Anthropic + well-behaved aggregators serve Claude uncapped.
+            assert _provider_requires_stream(
+                "anthropic", "https://api.anthropic.com", "Claude Opus 4.8"
+            ) is False
+            assert _provider_requires_stream(
+                "openrouter", "https://openrouter.ai/api/v1", "Claude Opus 4.8"
+            ) is False
+            assert _provider_requires_stream(
+                "nous", "https://inference-api.nousresearch.com/v1", "Claude Opus 4.8"
+            ) is False
+
+    def test_no_model_arg_preserves_legacy_behavior(self):
+        # Called without a model (older call shape) -> Claude path never engages.
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert _provider_requires_stream("custom", _ARGO) is False
+
+
 class TestForceStream:
     def test_force_stream_streams_without_a_hook(self):
         chunks = [_chunk(content="hi", finish_reason="stop")]

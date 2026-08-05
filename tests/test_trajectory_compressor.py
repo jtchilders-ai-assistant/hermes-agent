@@ -692,3 +692,85 @@ class TestCompressionNetSavingsGuard:
         assert compressed == trajectory
         assert sum(tc.count_turn_tokens(compressed)) == before
         tc._generate_summary_async.assert_not_called()
+
+
+class TestClaudeOnProxyStreaming:
+    """Raw-client summary path streams Claude-on-proxy when the flag is on."""
+
+    _ARGO = "https://apps-stage.inside.anl.gov/argoapi/v1"
+
+    def _compressor(self, model, base_url):
+        cfg = CompressionConfig()
+        cfg.summarization_model = model
+        cfg.base_url = base_url
+        return _make_compressor(cfg)
+
+    def test_should_stream_claude_on_argo_when_flag_on(self):
+        tc = self._compressor("Claude Opus 4.8", self._ARGO)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert tc._should_stream_summary() is True
+
+    def test_should_not_stream_when_flag_off(self):
+        tc = self._compressor("Claude Opus 4.8", self._ARGO)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {}},
+        ):
+            assert tc._should_stream_summary() is False
+
+    def test_should_not_stream_gpt_on_argo(self):
+        tc = self._compressor("GPT-5.6 Sol", self._ARGO)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"auxiliary": {"stream_claude_on_proxy": True}},
+        ):
+            assert tc._should_stream_summary() is False
+
+    def test_create_streaming_aggregates_deltas(self):
+        tc = self._compressor("Claude Opus 4.8", self._ARGO)
+
+        def _chunk(piece):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=piece))]
+            )
+
+        client = MagicMock()
+        client.chat.completions.create.return_value = [
+            _chunk("Hello "), _chunk("stream"), _chunk("ed."),
+        ]
+        resp = tc._create_streaming(client, {"model": "Claude Opus 4.8", "messages": []})
+        # stream=True must have been requested
+        assert client.chat.completions.create.call_args.kwargs["stream"] is True
+        # Aggregated into a non-stream-shaped response
+        assert resp.choices[0].message.content == "Hello streamed."
+
+    @pytest.mark.asyncio
+    async def test_acreate_streaming_aggregates_deltas(self):
+        tc = self._compressor("Claude Opus 4.8", self._ARGO)
+
+        def _chunk(piece):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=piece))]
+            )
+
+        class _AsyncChunks:
+            def __init__(self, items):
+                self._items = items
+
+            def __aiter__(self):
+                async def gen():
+                    for it in self._items:
+                        yield it
+                return gen()
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(
+            return_value=_AsyncChunks([_chunk("a"), _chunk("b"), _chunk("c")])
+        )
+        resp = await tc._acreate_streaming(
+            client, {"model": "Claude Opus 4.8", "messages": []})
+        assert client.chat.completions.create.call_args.kwargs["stream"] is True
+        assert resp.choices[0].message.content == "abc"

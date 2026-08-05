@@ -118,6 +118,76 @@ def _is_claude_model(model: str | None) -> bool:
     return "claude" in (model or "").lower()
 
 
+# Claude backends that serve the model UNCAPPED over an OpenAI-compatible
+# (/chat/completions) wire without the "Streaming is required" refusal — no
+# need to force streaming for these. Kept in one place so the auxiliary client
+# and the trajectory compressor agree on the definition.
+_SAFE_UNCAPPED_CLAUDE_HOSTS = (
+    "openrouter.ai",
+    "inference-api.nousresearch.com",
+    "api.anthropic.com",
+)
+
+# Providers that reach Claude over its native path (not an OpenAI-wire proxy)
+# and therefore never hit the proxy "Streaming is required" refusal.
+_NATIVE_CLAUDE_PROVIDERS = {"openrouter", "nous", "anthropic"}
+
+
+def is_claude_on_proxy_wire(
+    model: str | None,
+    provider: str | None,
+    base_url: str | None,
+) -> bool:
+    """True when ``model`` is a Claude model reached over an OpenAI-compatible
+    (/chat/completions) wire through a Vertex/Bedrock-style proxy — e.g.
+    Argonne's Argo gateway.
+
+    Such a proxy backs Claude, which treats ``max_tokens`` as a MANDATORY
+    field on its native wire. When it receives a non-streaming request with no
+    cap it assumes the model's full output budget, estimates the request could
+    exceed 10 minutes, and REFUSES the call with:
+
+        "Streaming is required for operations that may take longer than 10
+        minutes"
+
+    That breaks every non-streaming auxiliary task (vision, compression,
+    titles, …) and every non-streaming compressor summary on the proxy. The
+    fix is to STREAM those calls (the main conversation loop already streams,
+    which is why interactive chat works). This predicate identifies exactly the
+    Claude-on-proxy case; well-behaved aggregators that serve Claude uncapped
+    (OpenRouter, Nous Portal) and native Anthropic are excluded.
+    """
+    if not _is_claude_model(model):
+        return False
+    _provider_norm = str(provider or "").strip().lower()
+    if _provider_norm in _NATIVE_CLAUDE_PROVIDERS:
+        return False
+    _url = base_url or ""
+    if any(base_url_host_matches(_url, _h) for _h in _SAFE_UNCAPPED_CLAUDE_HOSTS):
+        return False
+    return True
+
+
+def stream_claude_on_proxy_enabled() -> bool:
+    """Feature flag: stream Claude-on-proxy auxiliary/compressor calls instead
+    of relying solely on the max_tokens cap mitigation.
+
+    Config: ``auxiliary.stream_claude_on_proxy`` in config.yaml (default False).
+    When False, behavior is unchanged (the existing max_tokens-cap fix handles
+    the proxy 'Streaming is required' refusal). When True, matching calls are
+    sent with ``stream=True`` and aggregated, which removes the practical
+    max_tokens ceiling the cap fix imposes for long generations.
+
+    Read is best-effort — a broken/absent config never breaks an LLM call.
+    """
+    try:
+        from hermes_cli.config import load_config
+        aux_cfg = (load_config() or {}).get("auxiliary", {}) or {}
+        return bool(aux_cfg.get("stream_claude_on_proxy", False))
+    except Exception:
+        return False
+
+
 _FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
 
 # ── Max output token limits per Anthropic model ───────────────────────

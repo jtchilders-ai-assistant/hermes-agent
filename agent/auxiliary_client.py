@@ -7647,7 +7647,9 @@ def _is_streaming_rejected_error(exc: Exception) -> bool:
     )
 
 
-def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
+def _provider_requires_stream(
+    provider: str, base_url: Optional[str], model: Optional[str] = None,
+) -> bool:
     """Detect providers that only accept streaming (non-stream = HTTP 400).
 
     Some OpenAI-compatible endpoints reject non-streaming chat requests
@@ -7662,8 +7664,31 @@ def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
     Beyond the known-host list, users can mark ANY custom endpoint as
     stream-only via ``auxiliary.stream_only_base_urls`` in config.yaml
     (list of substrings matched against the endpoint URL).
+
+    Additionally, when ``model`` is a Claude model reached over an OpenAI-wire
+    proxy (e.g. Argonne's Argo) AND the ``auxiliary.stream_claude_on_proxy``
+    flag is enabled, this returns True so the aux call streams — sidestepping
+    the proxy's "Streaming is required for operations that may take longer than
+    10 minutes" refusal without imposing the 21k-token cap the non-stream
+    mitigation needs. Default-off: unchanged behavior unless the flag is set.
     """
     _url = str(base_url or "").lower()
+    # Claude-on-proxy streaming (flag-gated) — independent of base_url being a
+    # known stream-only host, so evaluate it first.
+    if model is not None:
+        try:
+            from agent.anthropic_adapter import (
+                is_claude_on_proxy_wire,
+                stream_claude_on_proxy_enabled,
+            )
+            if (
+                stream_claude_on_proxy_enabled()
+                and is_claude_on_proxy_wire(model, provider, base_url)
+            ):
+                return True
+        except Exception:
+            # Best-effort; never break an aux call over the flag check.
+            pass
     if not _url:
         return False
     # Tencent Copilot — "Non-stream chat request is currently not supported"
@@ -8151,6 +8176,7 @@ def call_llm(
                         task,
                         force_stream=_provider_requires_stream(
                             resolved_provider, _base_info or resolved_base_url,
+                            kwargs.get("model"),
                         ),
                     ),
                 ),
@@ -8199,6 +8225,7 @@ def call_llm(
                                 force_stream=_provider_requires_stream(
                                     resolved_provider,
                                     _base_info or resolved_base_url,
+                                    kwargs.get("model"),
                                 ),
                             ),
                         ),
@@ -8806,6 +8833,7 @@ async def async_call_llm(
         _force_stream_async = (
             _provider_requires_stream(
                 resolved_provider, _client_base or resolved_base_url,
+                kwargs.get("model"),
             )
             and not isinstance(client, (
                 AsyncCodexAuxiliaryClient,
