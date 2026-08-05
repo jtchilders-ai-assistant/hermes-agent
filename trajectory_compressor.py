@@ -37,6 +37,7 @@ import yaml
 import logging
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -455,6 +456,87 @@ class TrajectoryCompressor:
             return "minimax"
         # Unknown base_url — not a known provider
         return ""
+
+    def _should_stream_summary(self) -> bool:
+        """True when the raw-client summary call should stream instead of using
+        a plain non-streaming create().
+
+        Only the raw ``self.client``/``async_client`` path is affected (the
+        ``call_llm`` path already handles streaming via the auxiliary client).
+        Streams only when the target is a Claude model on an OpenAI-wire proxy
+        (e.g. Argo) AND ``auxiliary.stream_claude_on_proxy`` is enabled —
+        matching the auxiliary client's behavior so both paths agree. This
+        sidesteps the proxy's "Streaming is required for operations that may
+        take longer than 10 minutes" refusal without capping output.
+
+        Best-effort: any failure returns False (unchanged non-stream path).
+        """
+        try:
+            from agent.anthropic_adapter import (
+                is_claude_on_proxy_wire,
+                stream_claude_on_proxy_enabled,
+            )
+            return (
+                stream_claude_on_proxy_enabled()
+                and is_claude_on_proxy_wire(
+                    self.config.summarization_model,
+                    self._detect_provider(),
+                    self.config.base_url,
+                )
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _aggregate_summary_stream(chunks) -> Any:
+        """Collapse a chat-completions stream into a minimal object exposing
+        ``.choices[0].message.content`` — the only field the callers read."""
+        parts: List[str] = []
+        for chunk in chunks:
+            try:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    parts.append(piece)
+            except Exception:
+                # A malformed chunk shouldn't abort the whole aggregation.
+                continue
+        content = "".join(parts)
+        _msg = SimpleNamespace(content=content)
+        _choice = SimpleNamespace(message=_msg)
+        return SimpleNamespace(choices=[_choice])
+
+    def _create_streaming(self, client, create_kwargs: Dict[str, Any]) -> Any:
+        """Sync: send create() with stream=True and aggregate the chunks."""
+        stream_kwargs = dict(create_kwargs)
+        stream_kwargs["stream"] = True
+        chunks = client.chat.completions.create(**stream_kwargs)
+        return self._aggregate_summary_stream(chunks)
+
+    async def _acreate_streaming(self, client, create_kwargs: Dict[str, Any]) -> Any:
+        """Async: send create() with stream=True and aggregate the chunks."""
+        stream_kwargs = dict(create_kwargs)
+        stream_kwargs["stream"] = True
+        chunks = await client.chat.completions.create(**stream_kwargs)
+        parts: List[str] = []
+        async for chunk in chunks:
+            try:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    parts.append(piece)
+            except Exception:
+                continue
+        content = "".join(parts)
+        _msg = SimpleNamespace(content=content)
+        _choice = SimpleNamespace(message=_msg)
+        return SimpleNamespace(choices=[_choice])
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text using the configured tokenizer."""
@@ -656,7 +738,10 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = self.client.chat.completions.create(**_create_kwargs)
+                    if self._should_stream_summary():
+                        response = self._create_streaming(self.client, _create_kwargs)
+                    else:
+                        response = self.client.chat.completions.create(**_create_kwargs)
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
@@ -725,7 +810,11 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = await self._get_async_client().chat.completions.create(**_create_kwargs)
+                    if self._should_stream_summary():
+                        response = await self._acreate_streaming(
+                            self._get_async_client(), _create_kwargs)
+                    else:
+                        response = await self._get_async_client().chat.completions.create(**_create_kwargs)
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
