@@ -3495,8 +3495,43 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # (which runs inline via should_use_direct_api_call) exactly like the codex
     # branch below — routing through the _interruptible_api_call method keeps the
     # outer loop's per-request retry/refresh seam intact.
+    #
+    # EXCEPTION — Claude over an OpenAI-wire proxy (e.g. Argonne Argo): that
+    # backend REFUSES a non-streaming request outright ("Streaming is required
+    # for operations that may take longer than 10 minutes"), so the inline
+    # non-streaming path above would 500 on every cron turn. For that case we
+    # must still stream on the wire. Rather than reach the non-streaming entry,
+    # fall through into the streaming machinery below but run it INLINE (no
+    # spawned worker thread) so the #62151 anti-wedge property is preserved.
+    # The deltas produced still go nowhere (cron has no consumer) — only the
+    # aggregated final response matters. Gated on the same detector + flag as
+    # the auxiliary/compressor argo-stream fix so behavior stays consistent and
+    # is default-off unless auxiliary.stream_claude_on_proxy is enabled.
+    _inline_stream_required = False
     if should_use_direct_api_call(agent):
-        return agent._interruptible_api_call(api_kwargs)
+        _requires_stream = False
+        if agent.api_mode == "chat_completions":
+            try:
+                from agent.anthropic_adapter import (
+                    is_claude_on_proxy_wire,
+                    stream_claude_on_proxy_enabled,
+                )
+                _requires_stream = (
+                    stream_claude_on_proxy_enabled()
+                    and is_claude_on_proxy_wire(
+                        getattr(agent, "model", None),
+                        getattr(agent, "provider", None),
+                        getattr(agent, "base_url", None),
+                    )
+                )
+            except Exception:
+                # Best-effort: never break the call over the flag/detector.
+                _requires_stream = False
+        if _requires_stream:
+            # Run the streaming path inline (see thread-spawn seam below).
+            _inline_stream_required = True
+        else:
+            return agent._interruptible_api_call(api_kwargs)
 
     if agent.api_mode == "codex_responses":
         # Codex streams internally via _run_codex_stream. The main dispatch
@@ -5264,11 +5299,24 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         if _reasoning_floor is not None:
             _stream_stale_timeout = max(_stream_stale_timeout, _reasoning_floor)
 
-    t = threading.Thread(target=_context_thread_target(_call), daemon=True)
-    t.start()
+    if _inline_stream_required:
+        # Claude-over-proxy under cron/inline (#62151 + argo-stream): run the
+        # streaming worker body ON THIS THREAD. No daemon worker is spawned, so
+        # the nested-pool wedge cannot occur; the request still streams on the
+        # wire (satisfying the proxy's "streaming required" rule) and the
+        # aggregated response is returned via ``result`` exactly as the polled
+        # path does. There is no interactive interrupt surface here (same as the
+        # non-streaming direct_api_call path), so the poll loop's interrupt/
+        # stale/heartbeat monitoring is intentionally skipped; the per-request
+        # httpx read/stale timeouts inside ``_call`` still bound a hung provider.
+        t = None
+        _call()
+    else:
+        t = threading.Thread(target=_context_thread_target(_call), daemon=True)
+        t.start()
     _last_heartbeat = time.time()
     _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
-    while t.is_alive():
+    while t is not None and t.is_alive():
         t.join(timeout=0.3)
 
         # Periodic heartbeat: touch the agent's activity tracker so the
