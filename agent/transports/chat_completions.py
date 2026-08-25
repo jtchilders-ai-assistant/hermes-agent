@@ -54,6 +54,24 @@ def _rename_tool_search_bridge_for_xai(tools: list[dict[str, Any]]) -> tuple[lis
     )
 
 
+_DISABLE_DEVELOPER_ROLE: bool | None = None
+
+
+def _developer_role_disabled() -> bool:
+    """Whether strict gateways should retain the system role for GPT-5/Codex."""
+    global _DISABLE_DEVELOPER_ROLE
+    if _DISABLE_DEVELOPER_ROLE is not None:
+        return _DISABLE_DEVELOPER_ROLE
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        _DISABLE_DEVELOPER_ROLE = bool(
+            cfg_get(load_config(), "model", "disable_developer_role", default=False)
+        )
+    except Exception:
+        _DISABLE_DEVELOPER_ROLE = False
+    return _DISABLE_DEVELOPER_ROLE
+
+
 def _static_prompt_instructions(messages: list[dict[str, Any]]) -> str:
     """Stable leading system/developer prefix used for cache routing (later messages are conversation state)."""
     first = messages[0] if messages and isinstance(messages[0], dict) else {}
@@ -323,6 +341,7 @@ def _swap_developer_role(sanitized: list, model_lower: str) -> list:
     if (
         sanitized and isinstance(sanitized[0], dict) and sanitized[0].get("role") == "system"
         and any(p in model_lower for p in DEVELOPER_ROLE_MODELS)
+        and not _developer_role_disabled()
     ):
         return [{**sanitized[0], "role": "developer"}, *sanitized[1:]]
     return sanitized
