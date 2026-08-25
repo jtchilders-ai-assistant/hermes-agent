@@ -19,6 +19,36 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 
+_DISABLE_DEVELOPER_ROLE: bool | None = None
+
+
+def _developer_role_disabled() -> bool:
+    """Return True when the system->developer role swap must be suppressed.
+
+    GPT-5/Codex models normally take their instruction message as
+    ``role: "developer"``. Some strict OpenAI-compatible gateways (e.g. ANL's
+    Argo) only accept ``role: "system"`` and reject the developer role with a
+    misleading 400 ("Unknown parameter: 'messages[0].tool_calls'"), which makes
+    every request from such a model fail before the first token.
+
+    Gated behind ``model.disable_developer_role`` (default False) so compliant
+    providers keep the upstream behavior. Cached at module level because
+    ``convert_messages``/``build_kwargs`` sit on the hot per-call path.
+    """
+    global _DISABLE_DEVELOPER_ROLE
+    if _DISABLE_DEVELOPER_ROLE is not None:
+        return _DISABLE_DEVELOPER_ROLE
+    disabled = False
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        disabled = bool(cfg_get(load_config(), "model", "disable_developer_role", default=False))
+    except Exception:
+        disabled = False  # fail SAFE: keep upstream behavior if config unresolved
+    _DISABLE_DEVELOPER_ROLE = disabled
+    return disabled
+
+
 def _static_prompt_instructions(messages: list[dict[str, Any]]) -> str:
     """Return the stable system/developer prefix used for cache routing.
 
@@ -575,6 +605,7 @@ class ChatCompletionsTransport(ProviderTransport):
             and isinstance(sanitized[0], dict)
             and sanitized[0].get("role") == "system"
             and any(p in model_lower for p in DEVELOPER_ROLE_MODELS)
+            and not _developer_role_disabled()
         ):
             sanitized = list(sanitized)
             sanitized[0] = {**sanitized[0], "role": "developer"}
@@ -769,6 +800,7 @@ class ChatCompletionsTransport(ProviderTransport):
             and isinstance(sanitized[0], dict)
             and sanitized[0].get("role") == "system"
             and any(p in _model_lower for p in DEVELOPER_ROLE_MODELS)
+            and not _developer_role_disabled()
         ):
             sanitized = list(sanitized)
             sanitized[0] = {**sanitized[0], "role": "developer"}
