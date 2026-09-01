@@ -155,6 +155,62 @@ def ensure_closed_code_fences(text: str) -> str:
     return text
 
 
+def strip_synthetic_code_fences(text: str, reference: str = "") -> str:
+    """Reverse the closing markers :func:`ensure_closed_code_fences` appends.
+
+    Streaming frames are passed through ``ensure_closed_code_fences`` so a
+    frame that stops mid-code-block still renders sanely.  That synthetic
+    closer is *not* part of the model's real output, so bookkeeping that
+    compares the visible prefix against the final text must remove it first
+    (see ``GatewayStreamConsumer._continuation_text``).
+
+    A trailing fence is genuinely ambiguous in isolation: ``"...x = 1\\n```"``
+    is byte-identical whether the model closed the block itself or we appended
+    the closer.  So *reference* (the authoritative full text) is the arbiter —
+    a candidate is accepted only when ``reference`` actually starts with it,
+    longest candidate first.  ``ensure_closed_code_fences`` also ``rstrip``s
+    newlines before appending, so trailing newlines are probed back too.
+
+    With no *reference* the ambiguity cannot be resolved, so nothing is
+    stripped — a genuine closing fence is never destroyed.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    if not reference:
+        # Ambiguous without the authoritative text; leave it alone.
+        return text
+
+    # Fast path: the prefix is already an exact prefix of the real text, so
+    # nothing synthetic was appended (or the fence is genuine).
+    if reference.startswith(text):
+        return text
+
+    candidates: list[str] = []
+
+    def _with_newlines(base: str) -> None:
+        # ensure_closed_code_fences() rstrips newlines before appending the
+        # fence, so the true prefix may carry trailing newlines we must restore.
+        for k in range(8, -1, -1):
+            candidates.append(base + "\n" * k)
+
+    out = text
+    if out.endswith("`") and not out.endswith("```"):
+        inline = out[:-1]
+        if ensure_closed_code_fences(inline) == out:
+            candidates.append(inline)
+            out = inline
+    if out.endswith("\n```"):
+        base = out[: -len("\n```")]
+        if ensure_closed_code_fences(base) == out:
+            _with_newlines(base)
+
+    for cand in candidates:
+        if cand and reference.startswith(cand):
+            return cand
+    # Nothing matched — the prefix genuinely diverges from the final text.
+    return text
+
+
 @dataclass
 class StreamConsumerConfig:
     """Runtime config for a single stream consumer instance."""
@@ -2088,10 +2144,29 @@ class GatewayStreamConsumer:
         return self._clean_for_display(prefix)
 
     def _continuation_text(self, final_text: str) -> str:
-        """Return only the part of final_text the user has not already seen."""
+        """Return only the part of final_text the user has not already seen.
+
+        The visible prefix has already been through
+        :func:`ensure_closed_code_fences`, so when the stream stopped inside a
+        code block (or an inline-code span) it carries a *synthetic* closing
+        marker that does not exist in ``final_text``.  A naive
+        ``final_text.startswith(prefix)`` therefore fails and the whole message
+        is resent as a duplicate, with the two messages disagreeing about fence
+        state — which renders code as prose and prose as code.  Strip the
+        synthetic closer before comparing, then reopen the carried fence on the
+        continuation so each delivered message is independently balanced.
+        """
         prefix = self._fallback_prefix or self._visible_prefix()
+        prefix = strip_synthetic_code_fences(prefix, final_text)
         if prefix and final_text.startswith(prefix):
-            return final_text[len(prefix):].lstrip()
+            tail = final_text[len(prefix):].lstrip()
+            if not tail:
+                return tail
+            from gateway.platforms.helpers import balance_fences_across_chunks
+
+            # Reopen (with the original language tag) any fence still open at
+            # the end of the visible prefix.
+            return balance_fences_across_chunks([prefix, tail])[1]
         return final_text
 
     @staticmethod
