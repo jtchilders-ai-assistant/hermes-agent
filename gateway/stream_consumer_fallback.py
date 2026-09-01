@@ -9,7 +9,7 @@ import logging
 from typing import Any, Callable, Optional
 
 from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
-from gateway.stream_consumer_fences import ensure_closed_code_fences
+from gateway.stream_consumer_fences import ensure_closed_code_fences, strip_synthetic_code_fences
 
 logger = logging.getLogger("gateway.stream_consumer")
 
@@ -48,15 +48,16 @@ class StreamFallbackMixin:
         return self._clean_for_display(prefix)
 
     def _continuation_text(self, final_text: str) -> str:
-        """Return only the part of final_text the user has not already seen."""
+        """Return only the unseen tail, accounting for synthetic fence closers."""
         prefix = self._fallback_prefix or self._visible_prefix()
+        prefix = strip_synthetic_code_fences(prefix, final_text)
         if prefix and final_text.startswith(prefix):
             cut = len(prefix)
             # ``prefix`` is whatever the last successful edit put on screen. Edits
             # fire on a throttle tick, not at a word boundary, so that prefix can
-            # end inside a word.  Back the cut up to the last space or newline so
+            # end inside a word. Back the cut up to the last space or newline so
             # the continuation re-sends the broken word's tail and reads as an
-            # ordinary continuation.  A prefix with no boundary (one very long
+            # ordinary continuation. A prefix with no boundary (one very long
             # token) keeps the original cut rather than re-sending the whole reply.
             if cut < len(final_text):
                 boundary = max(
@@ -65,7 +66,11 @@ class StreamFallbackMixin:
                 )
                 if boundary >= 0:
                     cut = boundary + 1
-            return final_text[cut:].lstrip()
+            tail = final_text[cut:].lstrip()
+            if not tail:
+                return tail
+            from gateway.platforms.helpers import balance_fences_across_chunks
+            return balance_fences_across_chunks([final_text[:cut], tail])[1]
         return final_text
 
     @staticmethod

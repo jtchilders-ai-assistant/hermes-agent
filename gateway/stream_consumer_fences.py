@@ -36,3 +36,39 @@ def ensure_closed_code_fences(text: str) -> str:
         text = text + "`"
 
     return text
+
+
+def strip_synthetic_code_fences(text: str, reference: str = "") -> str:
+    """Reverse only closing markers added by :func:`ensure_closed_code_fences`.
+
+    A trailing fence is ambiguous by itself, so the authoritative full text is
+    required. A candidate is removed only when the reference starts with the
+    resulting prefix.
+    """
+    if not isinstance(text, str) or not text or not reference:
+        return text
+    if reference.startswith(text):
+        return text
+
+    candidates: list[str] = []
+
+    def _with_newlines(base: str) -> None:
+        # ensure_closed_code_fences() rstrips newlines before appending a fence.
+        for count in range(8, -1, -1):
+            candidates.append(base + "\n" * count)
+
+    out = text
+    if out.endswith("`") and not out.endswith("```"):
+        inline = out[:-1]
+        if ensure_closed_code_fences(inline) == out:
+            candidates.append(inline)
+            out = inline
+    if out.endswith("\n```"):
+        base = out[: -len("\n```")]
+        if ensure_closed_code_fences(base) == out:
+            _with_newlines(base)
+
+    for candidate in candidates:
+        if candidate and reference.startswith(candidate):
+            return candidate
+    return text
