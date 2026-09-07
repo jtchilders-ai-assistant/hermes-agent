@@ -46,8 +46,9 @@ scripts/update-fork.sh                 # or: scripts/update-fork.sh v2026.9.14
   tests/test_trajectory_compressor.py \
   tests/agent/test_cron_inline_api_call_62151.py
 
-# 3. Promote to production (adopts patches, tags, ff patched-release,
-#    reinstalls venv, verifies hermes --version, pushes).
+# 3. Promote to production (adopts patches, tags, resets patched-release to
+#    the tested rebased stack, reinstalls venv, verifies hermes --version,
+#    pushes). Stop the running gateway before this step.
 scripts/promote-fork.sh v2026.9.14
 
 # 4. Restart any running Hermes gateway/CLI to pick up the new code.

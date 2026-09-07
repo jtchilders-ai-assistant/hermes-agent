@@ -6,16 +6,17 @@
 # custom-patch test suites are green. It:
 #   1. adopts integrate/<tag> as the new 'patches'
 #   2. tags the deploy: patched-tag/<tag>
-#   3. fast-forwards 'patched-release' to it
+#   3. resets 'patched-release' to that tested rebased commit
 #   4. moves 'upstream-tag' mirror to <tag>
 #   5. reinstalls the editable package into the repo venv and verifies hermes --version
 #   6. pushes branches + tags to origin
 #   7. deletes the disposable integrate/<tag> branch
 #
-# It force-updates the 'patches' branch pointer (history is rewritten by rebase),
-# which is expected and fine on a personal fork. It does NOT delete any safety
-# tags. If anything fails mid-way, patched-release is only moved AFTER install
-# verification, so production is never left broken.
+# A rebase rewrites commit ancestry, so patched-release CANNOT be fast-forwarded
+# to patches. Promotion therefore uses an explicit hard reset after creating a
+# safety tag. This script must be run from the production checkout only after
+# the Hermes gateway has been stopped; rewriting the live source under a running
+# Python process can mix module versions. It does NOT delete safety tags.
 #
 # Usage:  scripts/promote-fork.sh v2026.9.14
 #
@@ -38,6 +39,8 @@ TARGET_TAG="${1:-}"
 INTEG="integrate/${TARGET_TAG}"
 git rev-parse --verify "$INTEG" >/dev/null 2>&1 || die "No branch '$INTEG'. Run update-fork.sh first."
 [ -z "$(git status --porcelain)" ] || die "Working tree dirty. Resolve before promoting."
+[ "$(git branch --show-current)" = "patched-release" ] \
+  || die "Run promotion from the production checkout on branch 'patched-release'."
 
 # integrate branch must actually be built on the target tag
 git merge-base --is-ancestor "${TARGET_TAG}^{commit}" "$INTEG" \
@@ -62,12 +65,11 @@ fi
 say "Moving 'upstream-tag' mirror -> $TARGET_TAG"
 git branch -f upstream-tag "${TARGET_TAG}^{commit}"
 
-# --- 4. check out patched-release and fast-forward it -----------------------
-say "Checking out patched-release and fast-forwarding to patches"
-git checkout patched-release
-git merge --ff-only patches || die "patched-release could not fast-forward to patches. Manual review needed."
+# --- 4. reset patched-release to the tested, rebased stack ------------------
+say "Resetting patched-release to tested patches"
+git reset --hard patches
 
-# --- 5. reinstall + verify BEFORE we call it deployed -----------------------
+# --- 5. reinstall + verify --------------------------------------------------
 say "Reinstalling editable package into repo venv"
 "$VENV_PIP" install -e . --quiet
 say "Verifying hermes --version"
