@@ -326,12 +326,15 @@ def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets:
         from toolsets import get_all_toolsets
         for ts_name in get_all_toolsets():
             tools.update(resolve_toolset(ts_name))
-    # Disabled toolsets are always subtracted LAST, so a tool in a disabled
-    # toolset is stripped even when a composite (hermes-cli) re-enables it.
-    # This ensures that even if a composite toolset (like hermes-cli) is enabled, any tools belonging to a
-    # disabled toolset are strictly stripped out. See issue #17309.
-    if disabled_toolsets:
-        _apply_toolset_selection(tools, disabled_toolsets, quiet_mode, disable=True)
+    # Disabled toolsets are subtracted last. A dispatcher-owned Kanban worker
+    # must retain its lifecycle surface even if the assignee profile normally
+    # disables that toolset; delegated children remain excluded above.
+    effective_disabled = list(disabled_toolsets or [])
+    if (os.environ.get("HERMES_KANBAN_TASK") and not _is_delegated_child_context()
+            and _is_dispatcher_owned_worker()):
+        effective_disabled = [name for name in effective_disabled if name != "kanban"]
+    if effective_disabled:
+        _apply_toolset_selection(tools, effective_disabled, quiet_mode, disable=True)
     return tools
 
 
