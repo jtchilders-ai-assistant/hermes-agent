@@ -460,9 +460,21 @@ def _compute_tool_definitions(
     # Always apply disabled toolsets as a subtraction step at the end.
     # This ensures that even if a composite toolset (like hermes-cli)
     # is enabled, any tools belonging to a disabled toolset are strictly
-    # stripped out. See issue #17309.
-    if disabled_toolsets:
-        for toolset_name in disabled_toolsets:
+    # stripped out. See issue #17309. The one exception is the mandatory
+    # lifecycle surface of a dispatcher-owned Kanban worker: without it the
+    # worker cannot report completion, blocking, or review state. Delegated
+    # children remain excluded by the worker-context predicates.
+    effective_disabled_toolsets = list(disabled_toolsets or [])
+    if (
+        os.environ.get("HERMES_KANBAN_TASK")
+        and not _is_delegated_child_context()
+        and _is_dispatcher_owned_worker()
+    ):
+        effective_disabled_toolsets = [
+            name for name in effective_disabled_toolsets if name != "kanban"
+        ]
+    if effective_disabled_toolsets:
+        for toolset_name in effective_disabled_toolsets:
             if validate_toolset(toolset_name):
                 from toolsets import bundle_non_core_tools, get_toolset
                 if toolset_name.startswith("hermes-") or (get_toolset(toolset_name) or {}).get("posture"):
