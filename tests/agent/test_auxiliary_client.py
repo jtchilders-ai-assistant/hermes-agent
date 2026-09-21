@@ -429,10 +429,10 @@ class TestBuildCallKwargsMaxTokens:
     @pytest.mark.parametrize(
         "provider,model,base_url",
         [
-            # Aggregators/native that serve Claude uncapped without issue keep
-            # the omit-to-avoid-truncation behaviour — the proxy fix must not
-            # regress them.
-            ("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1"),
+            # Native/safe routes that do not need an explicit cap retain the
+            # omit-to-avoid-truncation behavior. OpenRouter is intentionally
+            # excluded: upstream now forwards explicit caps there to avoid
+            # credit-budget 402 responses.
             ("nous", "claude-sonnet", "https://inference-api.nousresearch.com/v1"),
             ("anthropic", "claude-opus-4.8", "https://api.anthropic.com"),
         ],

@@ -6429,6 +6429,14 @@ def _forwards_max_tokens(provider: str, provider_norm: str, model: str, effectiv
         or provider_norm == "openrouter"
         or base_url_host_matches(effective_base, "openrouter.ai")
         or _is_managed_local_endpoint(effective_base)
+        or (
+            "claude" in (model or "").lower()
+            and provider_norm not in {"openrouter", "nous", "nous-portal", "nousresearch", "anthropic"}
+            and not any(
+                base_url_host_matches(effective_base, host)
+                for host in ("openrouter.ai", "inference-api.nousresearch.com", "api.anthropic.com")
+            )
+        )
     )
 
 
