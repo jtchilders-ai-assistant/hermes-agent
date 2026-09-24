@@ -12,7 +12,7 @@
 #
 set -euo pipefail
 
-REPO_DIR="${HERMES_FORK_DIR:-$HOME/.hermes/hermes-agent}"
+REPO_DIR="${HERMES_FORK_DIR:-$HOME/.hermes/hermes-agent-src}"
 cd "$REPO_DIR"
 
 # Fetch upstream tags quietly (read-only; never touches working tree/branches).

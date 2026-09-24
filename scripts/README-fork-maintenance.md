@@ -1,76 +1,38 @@
-# Fork maintenance — branch model & update workflow
+# Fork maintenance under immutable Hermes releases
 
-This is a **personal fork** of Hermes Agent. We do **not** upstream changes.
-We periodically pull the latest upstream **release tag** and replay our custom
-patches on top of it, then deploy the result to `~/.hermes/hermes-agent` (which
-runs from the `patched-release` branch).
+This personal fork carries local-only patches rebased onto explicit Nous Research release tags. Source history and runtime deployment are separate.
 
-## Branches (long-lived)
+## Paths
 
-| Branch | Role |
-|---|---|
-| `upstream-tag` | Pure mirror of the latest upstream release **tag**. No custom code, ever. |
-| `patches` | Our custom commits, rebased onto `upstream-tag`. Source of truth for "what we changed". `git diff upstream-tag..patches` = our exact footprint. |
-| `patched-release` | The **deployed** ref. `~/.hermes/hermes-agent` checks this out. Only ever fast-forwarded to a *tested* commit. |
+- Mutable source/integration clone: `~/.hermes/hermes-agent-src`
+- Stable runtime symlink: `~/.hermes/hermes-agent`
+- Immutable releases: `~/.hermes/releases/hermes-agent/<tag>-<sha-prefix>`
+- Release workflow: `~/.hermes/release-tools/docs/future-upgrade-plan.md`
+- Operator runbook: `~/.hermes/release-tools/README.md`
 
-Disposable per-cycle: `integrate/<tag>` (rebase happens here, deleted after promote).
+Never edit, rebase, install into, or switch branches through the stable symlink or an accepted release.
 
-## Tags
+## Source refs
 
-| Tag | Role |
-|---|---|
-| `patched-tag/<upstream-tag>` | One annotated tag per deploy. Rollback target. |
-| `pre-update/<...>` | Snapshot of the previous state before a history-rewriting update. Safety net. |
+- `upstream-tag`: selected pure upstream release.
+- `patches`: complete custom stack rebased onto that tag.
+- `patched-release`: accepted/published source ref; not deployment state.
+- `integrate/<tag>`: disposable rebase candidate.
+- `patched-tag/<tag>`: accepted-source tag.
+- `pre-update/<stamp>`: preservation point before history rewrite.
 
-## Remotes
+## Upgrade summary
 
-- `origin` = our fork (`jtchilders-ai-assistant/hermes-agent`), default push target. Default branch on GitHub = `patched-release`.
-- `upstream` = `NousResearch/hermes-agent`, read-only, pull updates from here.
+1. In this source clone, run `scripts/update-fork.sh <explicit-tag>`.
+2. Resolve conflicts semantically; run range-diff, footprint checks, targeted and adjacent tests, lint/import checks, and baseline-aware wider tests.
+3. Obtain independent review; push the exact candidate with lease protection; verify local = origin = GitHub SHA.
+4. Build and validate a new immutable release with its own real-path venv and a pre-created allowlist manifest.
+5. Publish accepted source refs with explicit expected-old SHAs. This still does not deploy.
+6. Ask Taylor to boot out `user/$(id -u)/ai.hermes.gateway`, run `activate-release <release>`, and run `hermes gateway start`.
+7. Verify launchd definition/process, version/SHA, integrations, plugin target, SQLite integrity, and preserved rollback.
 
-## Update workflow (each cycle)
-
-```bash
-cd ~/.hermes/hermes-agent
-
-# 1. Rebase our stack onto the newest upstream tag (stops on first conflict).
-scripts/update-fork.sh                 # or: scripts/update-fork.sh v2026.9.14
-
-#    If it stops on a conflict, resolve (keep-both for additive; in-scope var
-#    for upstream renames), then:  GIT_EDITOR=true git rebase --continue
-
-# 2. Run the custom-patch test suites — MUST be green:
-./venv/bin/python -m pytest -q \
-  tests/agent/test_auxiliary_client.py \
-  tests/agent/transports/test_chat_completions.py \
-  tests/agent/test_anthropic_adapter.py \
-  tests/test_trajectory_compressor.py \
-  tests/agent/test_cron_inline_api_call_62151.py
-
-# 3. Promote to production (adopts patches, tags, resets patched-release to
-#    the tested rebased stack, reinstalls venv, verifies hermes --version,
-#    pushes). Stop the running gateway before this step.
-scripts/promote-fork.sh v2026.9.14
-
-# 4. Restart any running Hermes gateway/CLI to pick up the new code.
-```
+`scripts/promote-fork.sh` is intentionally disabled because its former editable-install deployment is unsafe under this architecture.
 
 ## Rollback
 
-```bash
-git checkout patched-release
-git reset --hard patched-tag/<older-version>
-./venv/bin/pip install -e . --quiet && ./venv/bin/hermes --version
-```
-
-## Our current custom patches (the `patches` stack)
-
-Run `git log --oneline upstream-tag..patches` for the live list. As of the
-first cycle (upstream `v2026.8.16`):
-
-1. `fix(auxiliary): keep max_tokens for Claude served over OpenAI-wire proxies`
-2. `feat(transports): config-gated strip of 'name' on tool-result messages`
-3. `feat(aux/compression): stream Claude on OpenAI-wire proxies (Argo)`
-4. `fix(cron): stream Claude-over-proxy inline so cron does not hit 'streaming required'`
-
-All are ALCF/Argo-specific and gated behind config flags
-(`strip_tool_message_name`, `stream_claude_on_proxy`). None exist upstream.
+Taylor boots out the same launchd service, activates the previous allowlisted release, then runs `hermes gateway start`. Do not rewrite Git refs, reinstall packages, or modify a release during incident rollback.
