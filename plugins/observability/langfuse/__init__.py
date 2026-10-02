@@ -577,20 +577,38 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
 
+    # A gateway turn may start and finish in different copied Contexts even on
+    # the same worker thread.  A long-lived ``start_as_current_observation``
+    # context manager owns an OpenTelemetry ContextVar token and cannot safely
+    # be unwound from a sibling Context.  Keep the root detached; children are
+    # explicitly parented through ``root_span.start_observation`` below.
     def open_root():
-        ctx = client.start_as_current_observation(trace_context=trace_ctx, name="Hermes turn", as_type="chain",
-                                                  input=trace_input, metadata=metadata, end_on_exit=False)
+        if hasattr(client, "start_observation"):
+            return None, client.start_observation(
+                trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+                input=trace_input, metadata=metadata,
+            )
+        # Compatibility for older SDKs and test doubles.  This path retains the
+        # old current-context behavior because those clients have no detached API.
+        ctx = client.start_as_current_observation(
+            trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+            input=trace_input, metadata=metadata, end_on_exit=False,
+        )
         return ctx, ctx.__enter__()
 
     root_ctx = root_span = None
     if propagate_attributes is not None:
         try:
+            # This scope is intentionally short-lived: its ContextVar token is
+            # entered and exited in this call, while the root itself is detached.
             with propagate_attributes(session_id=session_id or task_key, trace_name="Hermes turn",
                                       tags=["hermes", "langfuse"]):
                 root_ctx, root_span = open_root()
         except Exception:
-            root_ctx = None
-    if root_ctx is None:
+            # If scope teardown failed after creating the detached root, retain
+            # that root rather than leaking it and opening a duplicate.
+            pass
+    if root_span is None:
         root_ctx, root_span = open_root()
 
     with _failsafe("update_trace(input)"):  # SDK v3 uses update_trace()
@@ -631,9 +649,8 @@ def _end_root(state: TraceState, label: str) -> None:
     """End the root span then unwind its context; never raises."""
     with _failsafe(label):
         state.root_span.end()
-        # Unwind the root context manager now, while opentelemetry.trace.Span is
-        # still a real type; GC-driven close at interpreter teardown raises
-        # TypeError inside use_span's isinstance check.
+        # Compatibility for trace states opened by older plugin code or test
+        # doubles.  New roots are detached and therefore have no context token.
         if state.root_ctx is not None:
             state.root_ctx.__exit__(None, None, None)
 
