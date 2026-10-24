@@ -35,6 +35,9 @@ warn() { printf '\n\033[1;33m!!  %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mXX  %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- 0. preconditions -------------------------------------------------------
+if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+  die "A rebase is in progress. Resolve it with 'git rebase --continue' (or abort it) before running update-fork.sh."
+fi
 [ -z "$(git status --porcelain)" ] || die "Working tree is dirty. Commit/stash first."
 git rev-parse --verify patches           >/dev/null 2>&1 || die "Missing branch 'patches'."
 git rev-parse --verify upstream-tag      >/dev/null 2>&1 || die "Missing branch 'upstream-tag'."
@@ -97,9 +100,8 @@ Resolve it the same way we do every cycle:
   5. git add <resolved files>
   6. GIT_EDITOR=true git rebase --continue
 
-When the rebase completes, re-run this script's TAIL steps manually, OR just
-re-run:  scripts/update-fork.sh $TARGET_TAG   (it will detect the finished
-rebase state is clean and continue).  Then run:
+When the rebase completes, do NOT re-run update-fork.sh: the integration
+branch already contains the completed rebase. Validate that branch, then run:
 
   scripts/promote-fork.sh $TARGET_TAG
 

@@ -49,13 +49,20 @@ git merge-base --is-ancestor "${TARGET_TAG}^{commit}" "$INTEG" \
 DEPLOY_TAG="patched-tag/${TARGET_TAG}"
 [ "$(git rev-parse --short "$INTEG")" ] && say "Promoting $INTEG ($(git rev-parse --short "$INTEG")) -> production"
 
+# A deployment tag is immutable evidence of the exact accepted source.  Never
+# advance branches beneath a pre-existing tag that names another commit.
+if git rev-parse --verify "${DEPLOY_TAG}^{commit}" >/dev/null 2>&1; then
+  [ "$(git rev-parse "${DEPLOY_TAG}^{commit}")" = "$(git rev-parse "$INTEG")" ] \
+    || die "Deploy tag $DEPLOY_TAG already exists at a different commit; refusing promotion."
+fi
+
 # --- 1. adopt as patches ----------------------------------------------------
 say "Updating 'patches' -> $INTEG"
 git branch -f patches "$INTEG"
 
 # --- 2. deploy tag ----------------------------------------------------------
 if git rev-parse --verify "$DEPLOY_TAG" >/dev/null 2>&1; then
-  say "Deploy tag $DEPLOY_TAG already exists — leaving as-is"
+  say "Deploy tag $DEPLOY_TAG already exists at this candidate — leaving as-is"
 else
   say "Tagging deploy: $DEPLOY_TAG"
   git tag -a "$DEPLOY_TAG" "$INTEG" -m "Custom patch stack rebased onto upstream $TARGET_TAG (deployed $(date +%Y-%m-%d))"
