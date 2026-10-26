@@ -55,8 +55,8 @@ def test_update_fork_refuses_to_run_during_an_active_rebase(tmp_path):
     assert (repo / ".git" / "rebase-merge").exists() or (repo / ".git" / "rebase-apply").exists()
 
 
-def test_promote_fork_refuses_mismatched_existing_deployment_tag(tmp_path):
-    """A release tag is immutable: promotion may not move refs beneath a mismatch."""
+def test_promote_fork_is_disabled_and_moves_no_refs(tmp_path):
+    """In-place promotion is retired: it must refuse before touching any ref."""
     repo = _git_repo(tmp_path)
     _run(["git", "tag", "v0.22.5"], repo)
     _run(["git", "checkout", "-qb", "integrate/v0.22.5"], repo)
@@ -64,12 +64,12 @@ def test_promote_fork_refuses_mismatched_existing_deployment_tag(tmp_path):
     _run(["git", "add", "candidate"], repo)
     _run(["git", "commit", "-qm", "candidate"], repo)
     _run(["git", "checkout", "-q", "patched-release"], repo)
-    _run(["git", "tag", "-a", "patched-tag/v0.22.5", "-m", "old release"], repo)
+    before = {r: _run(["git", "rev-parse", r], repo).stdout for r in ("patches", "patched-release", "upstream-tag")}
 
     result = _run(["bash", "scripts/promote-fork.sh", "v0.22.5"], repo, check=False)
 
-    assert result.returncode != 0
-    assert "already exists" in result.stderr
-    assert _run(["git", "rev-parse", "patches"], repo).stdout == _run(
-        ["git", "rev-parse", "upstream-tag"], repo
-    ).stdout
+    assert result.returncode == 64
+    assert "intentionally disabled" in result.stderr
+    after = {r: _run(["git", "rev-parse", r], repo).stdout for r in before}
+    assert after == before
+    assert _run(["git", "tag", "-l", "patched-tag/*"], repo).stdout == ""

@@ -6,7 +6,7 @@
 # Branch model (see docs at bottom):
 #   upstream-tag      pure mirror of the latest upstream release tag (no custom code)
 #   patches           our custom commits, rebased onto upstream-tag  (source of truth for "what we changed")
-#   patched-release   the DEPLOYED ref; ~/.hermes/hermes-agent runs this. Only ever moves to a *tested* commit.
+#   patched-release   accepted source of the newest immutable release (publishing is NOT deployment)
 #   integrate/<tag>   disposable per-cycle scratch branch where the rebase happens
 #
 # Tags:
@@ -19,8 +19,8 @@
 # force-pushes, never touches patched-release, and never deploys on its own.
 #
 # Usage:
-#   scripts/update-fork.sh                 # target newest v2026.* upstream tag
-#   scripts/update-fork.sh v2026.9.14      # target a specific tag
+#   scripts/update-fork.sh                 # target newest stable upstream tag
+#   scripts/update-fork.sh v0.23.0         # target a specific tag
 #
 set -euo pipefail
 
@@ -51,7 +51,8 @@ git fetch "$UPSTREAM_REMOTE" --tags --prune
 if [ "${1:-}" != "" ]; then
   TARGET_TAG="$1"
 else
-  TARGET_TAG="$(git tag -l 'v2026.*' --sort=-creatordate | head -1)"
+  # Newest STABLE upstream tag (SemVer v0.x since Oct 2026; '+canary' excluded).
+  TARGET_TAG="$(git tag -l 'v[0-9]*' --sort=-version:refname --sort=-creatordate | grep -v '+' | head -1 || true)"
 fi
 [ -n "$TARGET_TAG" ] || die "Could not determine target tag."
 git rev-parse --verify "${TARGET_TAG}^{commit}" >/dev/null 2>&1 || die "Tag '$TARGET_TAG' not found."
@@ -101,9 +102,8 @@ Resolve it the same way we do every cycle:
   6. GIT_EDITOR=true git rebase --continue
 
 When the rebase completes, do NOT re-run update-fork.sh: the integration
-branch already contains the completed rebase. Validate that branch, then run:
-
-  scripts/promote-fork.sh $TARGET_TAG
+branch already contains the completed rebase. Validate that branch, then
+follow scripts/README-fork-maintenance.md (immutable release build).
 
 EOF
   exit $RC
@@ -114,18 +114,13 @@ cat <<EOF
 
 $(say "Rebase onto $TARGET_TAG completed cleanly on $INTEG.")
 
-NEXT (not automated — these are the judgment/deploy steps):
+NEXT (not automated — judgment/deploy steps; see scripts/README-fork-maintenance.md):
 
-  # a) run the custom-patch test suites — MUST be green
-  ./venv/bin/python -m pytest -q \\
-    tests/agent/test_auxiliary_client.py \\
-    tests/agent/transports/test_chat_completions.py \\
-    tests/agent/test_anthropic_adapter.py \\
-    tests/test_trajectory_compressor.py \\
-    tests/agent/test_cron_inline_api_call_62151.py
-
-  # b) once green, promote:
-  scripts/promote-fork.sh $TARGET_TAG
+  a) run the fork patch suites listed in scripts/README-fork-maintenance.md
+  b) push $INTEG and get an independent review
+  c) build + verify a NEW immutable release (~/.hermes/release-tools/build-parallel-release)
+  d) publish refs: patches, upstream-tag, patched-release, patched-tag/$TARGET_TAG
+  e) Taylor stops the gateway, runs activate-<release>, starts the gateway
 
 Safety snapshot of the previous patches state: $SNAP_TAG
 EOF
